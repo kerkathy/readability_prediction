@@ -1,0 +1,9 @@
+# conda install pytorch==1.12.1 torchvision==0.13.1 torchaudio==0.12.1 cudatoolkit=11.3 -c pytorch
+accelerate
+transformers
+nlp
+datasets
+# accelerate==0.3.0
+# transformers==4.10.3
+# nlp==0.4.0
+# datasets==1.9.0
