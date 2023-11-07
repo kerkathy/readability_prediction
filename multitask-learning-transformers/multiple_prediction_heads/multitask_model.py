@@ -56,21 +56,6 @@ class BertForSequenceClassification(BertPreTrainedModel):
     @add_start_docstrings_to_model_forward(
         BERT_INPUTS_DOCSTRING.format("batch_size, sequence_length")
     )
-    # official version
-    # @add_code_sample_docstrings(
-    #     checkpoint=_CHECKPOINT_FOR_SEQUENCE_CLASSIFICATION,
-    #     output_type=SequenceClassifierOutput,
-    #     config_class=_CONFIG_FOR_DOC,
-    #     expected_output=_SEQ_CLASS_EXPECTED_OUTPUT,
-    #     expected_loss=_SEQ_CLASS_EXPECTED_LOSS,
-    # )    
-    # this repo original version
-    # @add_code_sample_docstrings(
-    #     tokenizer_class=_TOKENIZER_FOR_DOC,
-    #     checkpoint=_CHECKPOINT_FOR_DOC,
-    #     output_type=SequenceClassifierOutput,
-    #     config_class=_CONFIG_FOR_DOC,
-    # )
     # my modified version
     @add_code_sample_docstrings(
         checkpoint=_CHECKPOINT_FOR_DOC,

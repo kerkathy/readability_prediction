@@ -21,18 +21,19 @@ class NLPDataCollator:
         if isinstance(first, dict):
             # NLP data sets current works presents features as lists of dictionary
             # (one per example), so we  will adapt the collate_batch logic for that
-            if "labels" in first and first["labels"] is not None:
-                if first["labels"].dtype == torch.int64:
+            batch = {}
+            if "label" in first and (first["label"] is not None):
+                if first["label"].dtype is torch.int64:
                     labels = torch.tensor(
-                        [f["labels"] for f in features], dtype=torch.long
+                        [f["label"] for f in features], dtype=torch.long
                     )
                 else:
                     labels = torch.tensor(
-                        [f["labels"] for f in features], dtype=torch.float
+                        [f["label"] for f in features], dtype=torch.float
                     )
                 batch = {"labels": labels}
             for k, v in first.items():
-                if k != "labels" and v is not None and not isinstance(v, str):
+                if k != "label" and v is not None and not isinstance(v, str):
                     batch[k] = torch.stack([f[k] for f in features])
             return batch
         else:
