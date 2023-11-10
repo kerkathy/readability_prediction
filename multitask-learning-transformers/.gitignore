@@ -1,3 +1,7 @@
+# unused folder
+multiple_prediction_heads/
+shared_encoder/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
