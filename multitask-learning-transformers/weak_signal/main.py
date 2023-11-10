@@ -1,16 +1,21 @@
+# # %%
+# import os
+# #os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0"
 # %%
 import logging
 import torch
 import nltk
 import numpy as np
-from datasets import load_dataset, load_metric
+from datasets import load_dataset
+import evaluate
 from torch.utils.data.dataloader import DataLoader
 from tqdm.auto import tqdm
 from tqdm import tqdm as tqdm1
 import transformers
 from accelerate import Accelerator
 from filelock import FileLock
-from transformers import set_seed, Trainer
+from transformers import set_seed, Trainer, TrainingArguments, EvalPrediction
 from transformers.file_utils import is_offline_mode
 from utils.arguments import parse_args
 from model import BertForMTPairwiseRanking
@@ -71,6 +76,7 @@ raw_dataset = load_dataset(
 )
 print(raw_dataset['train'][0])
 print(raw_dataset['train'].features.keys())
+print(raw_dataset)
 
 # %%
 # Initialize tokenizer and model from pretrained checkpoint
@@ -82,7 +88,6 @@ model = BertForMTPairwiseRanking.from_pretrained(
     task_labels_map=task_labels_map,
     signal_list=signal_list,
 )
-# print(model.bert.embeddings.word_embeddings.weight.data_ptr())
 
 # %%
 def preprocess_function(example_batch):
@@ -164,10 +169,39 @@ print(eval_dataset[0])
 assert set(train_dataset[0].keys()) == set(["input_ids", "attention_mask", "labels"]), f"Keys mismatch: {set(train_dataset[0].keys())}"
 
 # %%
+def compute_metrics(p: EvalPrediction):
+    """
+    For each weak signal, compute its ranking accuracy.
+    """
+    preds, labels = p.predictions, p.label_ids
+    print(f"preds.shape = {preds.shape}")
+    print(f"labels.shape = {labels.shape}")
 
+
+    # preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
+    preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
+    metric = evaluate.load("accuracy")
+    # for signal in signal_list:
+
+    # prediction[idx] = torch.where(
+    #     logits_1[idx] - logits_2[idx] > self.margin[idx],
+    #     1,
+    #     torch.where(
+    #         logits_1[idx] - logits_2[idx] < -self.margin[idx]
+    #         -1,
+    #         0,
+    #     ),
+    # )
+    result = metric.compute(predictions=preds, references=labels)
+
+    if len(result) > 1:
+        result["combined_score"] = np.mean(list(result.values())).item()
+    return result
+
+# %%
 trainer = Trainer(
     model=model,
-    args=transformers.TrainingArguments(
+    args=TrainingArguments(
         output_dir=output_dir,
         # output_dir=args.output_dir,
         overwrite_output_dir=True,
@@ -178,54 +212,63 @@ trainer = Trainer(
         per_device_train_batch_size=per_device_train_batch_size,
         # per_device_train_batch_size=args.per_device_train_batch_size,
         # save_steps=3000,
-        # evaluation_strategy="epoch",
+        evaluation_strategy="epoch",
         save_strategy="epoch",
     ),
     train_dataset=train_dataset,
     tokenizer=tokenizer,
-    # eval_dataset=encoded_dataset["validation"],
-    # coompute_metrics=multitask_compute_metrics,
+    # eval_dataset=eval_dataset,
+    # compute_metrics=compute_metrics,
 )
 
 # trainer.args.local_rank = -1
 print(f"Trainer is using device: {trainer.args.device}")
 
-# %%
 trainer.train()
 
-
 # %%
-def multitask_compute_metrics(eval_dataset, batch_size=8):
-    print("modified!")
-    preds_dict = {}
-    # TODO: 改成每個 signal 的 accuracy
+# def compute_metrics(eval_dataset, batch_size=8):
+#     preds_dict = {}
+#     # TODO: 改成每個 signal 的 accuracy
 
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    model = model.to(device)
-    for task_name in ["quora_keyword_pairs", "spaadia_squad_pairs"]:
-        val_len = len(eval_dataset[task_name])
-        acc = 0.0
-        for index in range(0, val_len):
-            # TODO: 改成 batch
+#     device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+#     model = model.to(device)
+#     for task_name in ["quora_keyword_pairs", "spaadia_squad_pairs"]:
+#         val_len = len(eval_dataset[task_name])
+#         acc = 0.0
+#         for index in range(0, val_len):
+#             # TODO: 改成 batch
 
-            # forward pass
-            inputs = eval_dataset[task_name][index]["input_ids"].reshape(1, -1)  # dim 1 is batch size!!
-            inputs = inputs.to(device)
-            logits = model(inputs, task_name=task_name)[0]
+#             # forward pass
+#             inputs = eval_dataset[task_name][index]["input_ids"].reshape(1, -1)  # dim 1 is batch size!!
+#             inputs = inputs.to(device)
+#             logits = model(inputs, task_name=task_name)[0]
 
-            # compute accuracy
-            labels = eval_dataset[task_name][index]["label"]
-            predictions = torch.argmax(
-                torch.FloatTensor(torch.softmax(logits, dim=1).detach().cpu().tolist()),
-                dim=1,
-            )
-            acc += sum(np.array(predictions) == np.array(labels))
-        acc = acc / val_len
-        print(f"Task name: {task_name} \t Accuracy: {acc}")
+#             # compute accuracy
+#             labels = eval_dataset[task_name][index]["label"]
+#             predictions = torch.argmax(
+#                 torch.FloatTensor(torch.softmax(logits, dim=1).detach().cpu().tolist()),
+#                 dim=1,
+#             )
+#             acc += sum(np.array(predictions) == np.array(labels))
+#         acc = acc / val_len
+#         print(f"Task name: {task_name} \t Accuracy: {acc}")
+
+        # prediction[idx] = torch.where(
+        #     logits_1[idx] - logits_2[idx] > self.margin[idx],
+        #     1,
+        #     torch.where(
+        #         logits_1[idx] - logits_2[idx] < -self.margin[idx]
+        #         -1,
+        #         0,
+        #     ),
+        # )
+
+
 # %%
 # evaluate on given tasks
 model.eval()
-multitask_compute_metrics(eval_dataset=eval_dataset, batch_size=8)
+compute_metrics(eval_dataset=eval_dataset, batch_size=8)
 # %%
 
 # save model with timestamp

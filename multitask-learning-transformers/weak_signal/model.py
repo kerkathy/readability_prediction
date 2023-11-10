@@ -58,10 +58,10 @@ class BertForMTPairwiseRanking(BertPreTrainedModel):
             else config.hidden_dropout_prob
         )
         self.dropout = nn.Dropout(classifier_dropout)
-        self.regressors = [] # regressor for each signal in signal_list
+        self.regressors = nn.ModuleList()
         for signal in self.signal_list:
-            self.regressors.append(nn.Linear(config.hidden_size, 1).to(self.device))
-        self.margin = nn.Parameter(torch.ones(len(self.signal_list))) # what should be the init value?
+            self.regressors.append(nn.Linear(config.hidden_size, 1))
+        self.margin = nn.Parameter(torch.ones(len(self.signal_list))) # TODO: what should be the init value?
 
         self.post_init()
 
@@ -86,75 +86,65 @@ class BertForMTPairwiseRanking(BertPreTrainedModel):
             config.num_labels - 1]`. If :obj:`config.num_labels == 1` a regression loss is computed (Mean-Square loss),
             If :obj:`config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = (
-            return_dict if return_dict is not None else self.config.use_return_dict
-        )
-        assert torch.all(torch.logical_or(torch.logical_or(labels == 1, labels == -1), labels == 0)), "Labels must be 1, -1, or 0"
 
+        print("input_ids:", input_ids.shape)
+        assert torch.all(torch.logical_or(torch.logical_or(labels == 1, labels == -1), labels == 0)), "Labels must be 1, -1, or 0"
         assert input_ids.size(1) == 2, "input_ids must have first dimension = 2"
         assert attention_mask.size(1) == 2, "input_ids must have first dimension = 2"
 
-        # Seperate input_ids, attention_mask, token_type_ids for each sentence
-        input_ids_1 = input_ids[:, 0] # shape: [1, 2, max_length] -> [1, max_length]
-        input_ids_2 = input_ids[:, 1]
-        attention_mask_1 = attention_mask[:, 0] # shape: [1, 2, max_length] -> [1, max_length]
-        attention_mask_2 = attention_mask[:, 1]
+        # Seperate input_ids, attention_mask for each sentence
+        input_ids_1, input_ids_2 = input_ids.unbind(dim=1) # shape: [1, 2, max_length] -> [1, max_length]
+        attention_mask_1, attention_mask_2 = attention_mask.unbind(dim=1) # shape: [1, 2, max_length] -> [1, max_length]
 
-        inputs = [{"input_ids": input_ids.to(self.device), "attention_mask": attention_mask.to(self.device)} for input_ids, attention_mask in zip([input_ids_1, input_ids_2], [attention_mask_1, attention_mask_2])]
-        outputs = []
-        for input in inputs:
-            outputs.append(self.bert(**input))
+        inputs = [{"input_ids": ids.to(self.device), "attention_mask": mask.to(self.device)} for ids, mask in zip([input_ids_1, input_ids_2], [attention_mask_1, attention_mask_2])]
+        
+        print("inputs[0]:", inputs[0]["input_ids"].shape)
+        outputs = [self.bert(**input) for input in inputs]
 
         pooled_outputs = [output[1].to(self.device) for output in outputs] # [1] is the pooled output
 
         pooled_outputs = [self.dropout(pooled_output) for pooled_output in pooled_outputs]
-        # list of predicted signals by regressor
-        logits = []
-        difference = []
+        pooled_outputs = [pool_output.to(self.device) for pool_output in pooled_outputs] # shape of each pool_output: [batch_size, hidden_size]
+        
+        num_signals = len(self.signal_list)
+        batch_size = pooled_outputs[0].shape[0]  # Assuming all pooled_outputs have the same batch size
+
+        logits = torch.zeros(num_signals, 2, batch_size).to(self.device) # shape: (num_signals, 2, batch_size)
+        difference = torch.zeros(num_signals, batch_size).to(self.device) # shape: (num_signals, batch_size)
+
         for idx, signal in enumerate(self.signal_list):
-            self.regressors[idx] = self.regressors[idx].to(self.device)
-            logit_pair = [self.regressors[idx](pooled_output.to(self.device)) for pooled_output in pooled_outputs]
-            # don't know if the code below works... is it differentiable?
-            difference.append(logit_pair[0] - logit_pair[1])
-            logits.append(logit_pair)
+            logit_pair = [self.regressors[idx](pooled_output) for pooled_output in pooled_outputs] # shape of each element: [batch_size, 1]
+            difference[idx] = (logit_pair[0] - logit_pair[1]).squeeze(-1)
+            logits[idx] = torch.stack(logit_pair).squeeze(-1)
+        
+        # logits = []
+        # difference = []
+        # for idx, signal in enumerate(self.signal_list):
+        #     logit_pair = [self.regressors[idx](pooled_output) for pooled_output in pooled_outputs]
+        #     difference.append(logit_pair[0] - logit_pair[1])
+        #     logits.append(logit_pair)
 
-            # prediction[idx] = torch.where(
-            #     logits_1[idx] - logits_2[idx] > self.margin[idx],
-            #     1,
-            #     torch.where(
-            #         logits_1[idx] - logits_2[idx] < -self.margin[idx]
-            #         -1,
-            #         0,
-            #     ),
-            # )
+        # logits = torch.tensor(logits).to(self.device) # dim = (num_signals, batch_size)
+        # difference = torch.tensor(difference).to(self.device) # dim = (num_signals)
 
-        # convert logits and difference to tensors
-        logits = torch.tensor(logits).to(self.device) # dim = (num_signals, batch_size)
-        difference = torch.tensor(difference).to(self.device) # dim = (num_signals)
-        self.margin = self.margin.to(self.device)
-
-        # check shape
+        self.margin = self.margin.unsqueeze(1).expand_as(difference)
         assert difference.shape == self.margin.shape, f"Difference and margin must have the same shape, but got difference.shape = {difference.shape} and margin.shape = {self.margin.shape}"
 
-        labels = labels.squeeze(0)[0].to(self.device) # shape: [1, 2, len(signal_list)] -> [len(signal_list)]
-        assert labels.shape == difference.shape, f"Labels and difference must have the same shape, but got labels.shape = {labels.shape} and difference.shape = {difference.shape}"
-
         loss = None
-        prob_pos = torch.sigmoid(difference - self.margin)
+        prob_pos = torch.sigmoid(difference - self.margin) # shape: (num_signals, batch_size)
         prob_neg = torch.sigmoid(-difference - self.margin)
         prob_neutral = 1 - prob_pos - prob_neg
         prob_pos, prob_neg, prob_neutral = prob_pos.to(self.device), prob_neg.to(self.device), prob_neutral.to(self.device)
+        
+        labels = labels.unbind(dim=1)[0].transpose(0, 1) # shape: [batch_size, 2, num_signals] -> [num_signals, batch_size] (remove because it's duplicate)
+        labels = labels.to(self.device)
+        assert labels.shape == difference.shape, f"Labels and difference must have the same shape, but got labels.shape = {labels.shape} and difference.shape = {difference.shape}"
+        
         loss = -torch.log(prob_pos[labels == 1]).sum() - torch.log(prob_neg[labels == -1]).sum() - torch.log(prob_neutral[labels == 0]).sum()
 
         return MTPairwiseRankingModelOutput(
             loss=loss,
-            logits=logits,
+            logits=logits, # shape: (num_signals, batch_size)
             hidden_states=[output.hidden_states for output in outputs],
             attentions=[output.attentions for output in outputs],
         )
-
-# multitask_model = BertForMTPairwiseRanking.from_pretrained("bert-base-uncased")
-
-# %%
-
-
