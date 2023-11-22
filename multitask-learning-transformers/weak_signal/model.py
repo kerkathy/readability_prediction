@@ -36,7 +36,8 @@ from transformers.utils import ModelOutput
 @dataclass
 class MTPairwiseRankingModelOutput(ModelOutput):
     loss: Optional[torch.FloatTensor] = None
-    logits: Optional[List[torch.FloatTensor]] = None
+    logits: torch.FloatTensor = None
+    # logits: Optional[List[torch.FloatTensor]] = None
     hidden_states: Optional[List[torch.FloatTensor]] = None
     attentions: Optional[List[torch.FloatTensor]] = None
 
@@ -137,6 +138,6 @@ class BertForMTPairwiseRanking(BertPreTrainedModel):
         return MTPairwiseRankingModelOutput(
             loss=loss,
             logits=logits, # shape: (num_signals, batch_size)
-            hidden_states=[output.hidden_states for output in outputs],
+            hidden_states=[output.hidden_states for output in outputs], # TODO: convert to tensor?
             attentions=[output.attentions for output in outputs],
         )

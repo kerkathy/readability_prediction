@@ -30,6 +30,12 @@ def parse_args():
         help="A csv or a json file containing the validation data.",
     )
     parser.add_argument(
+        "--test_file",
+        type=str,
+        default=None,
+        help="A csv or a json file containing the test data.",
+    )
+    parser.add_argument(
         "--ignore_pad_token_for_loss",
         type=bool,
         default=True,
@@ -37,7 +43,7 @@ def parse_args():
         "padded labels in the loss computation or not.",
     )
     parser.add_argument(
-        "--max_source_length",
+        "--max_seq_length",
         type=int,
         default=1024,
         help="The maximum total input sequence length after "
