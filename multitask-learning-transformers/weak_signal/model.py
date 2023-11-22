@@ -87,7 +87,7 @@ class BertForMTPairwiseRanking(BertPreTrainedModel):
             If :obj:`config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
 
-        print("input_ids:", input_ids.shape)
+        # print("input_ids:", input_ids.shape)
         assert torch.all(torch.logical_or(torch.logical_or(labels == 1, labels == -1), labels == 0)), "Labels must be 1, -1, or 0"
         assert input_ids.size(1) == 2, "input_ids must have first dimension = 2"
         assert attention_mask.size(1) == 2, "input_ids must have first dimension = 2"
@@ -98,7 +98,7 @@ class BertForMTPairwiseRanking(BertPreTrainedModel):
 
         inputs = [{"input_ids": ids.to(self.device), "attention_mask": mask.to(self.device)} for ids, mask in zip([input_ids_1, input_ids_2], [attention_mask_1, attention_mask_2])]
         
-        print("inputs[0]:", inputs[0]["input_ids"].shape)
+        # print("inputs[0]:", inputs[0]["input_ids"].shape)
         outputs = [self.bert(**input) for input in inputs]
 
         pooled_outputs = [output[1].to(self.device) for output in outputs] # [1] is the pooled output
@@ -116,23 +116,15 @@ class BertForMTPairwiseRanking(BertPreTrainedModel):
             logit_pair = [self.regressors[idx](pooled_output) for pooled_output in pooled_outputs] # shape of each element: [batch_size, 1]
             difference[idx] = (logit_pair[0] - logit_pair[1]).squeeze(-1)
             logits[idx] = torch.stack(logit_pair).squeeze(-1)
-        
-        # logits = []
-        # difference = []
-        # for idx, signal in enumerate(self.signal_list):
-        #     logit_pair = [self.regressors[idx](pooled_output) for pooled_output in pooled_outputs]
-        #     difference.append(logit_pair[0] - logit_pair[1])
-        #     logits.append(logit_pair)
 
-        # logits = torch.tensor(logits).to(self.device) # dim = (num_signals, batch_size)
-        # difference = torch.tensor(difference).to(self.device) # dim = (num_signals)
-
-        self.margin = self.margin.unsqueeze(1).expand_as(difference)
-        assert difference.shape == self.margin.shape, f"Difference and margin must have the same shape, but got difference.shape = {difference.shape} and margin.shape = {self.margin.shape}"
+        expanded_margin = self.margin.data.new(*difference.shape).copy_(self.margin.data.unsqueeze(1).expand_as(difference))
+        # self.margin = self.margin.unsqueeze(1).expand_as(difference)
+        assert difference.shape == expanded_margin.shape, f"Difference and margin must have the same shape, but got difference.shape = {difference.shape} and margin.shape = {self.margin.shape}"
+        # assert difference.shape == self.margin.shape, f"Difference and margin must have the same shape, but got difference.shape = {difference.shape} and margin.shape = {self.margin.shape}"
 
         loss = None
-        prob_pos = torch.sigmoid(difference - self.margin) # shape: (num_signals, batch_size)
-        prob_neg = torch.sigmoid(-difference - self.margin)
+        prob_pos = torch.sigmoid(difference - expanded_margin) # shape: (num_signals, batch_size)
+        prob_neg = torch.sigmoid(-difference - expanded_margin)
         prob_neutral = 1 - prob_pos - prob_neg
         prob_pos, prob_neg, prob_neutral = prob_pos.to(self.device), prob_neg.to(self.device), prob_neutral.to(self.device)
         
