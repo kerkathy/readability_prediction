@@ -1,15 +1,15 @@
 # write a train script for main.py with arguments
 # Usage: bash train.sh
-# --do_eval \
 # --resume_from_checkpoint output/checkpoint-500/ \
+# --report_to wandb \
+# --do_train \
 
 python ./main.py \
---model_name_or_path bert-base-cased \
+--model_name_or_path bert-base-uncased \
 --task_name ose \
---do_train \
 --do_eval \
---max_train_samples 40 \
---max_eval_samples 40 \
+--max_train_samples 20 \
+--max_eval_samples 20 \
 --train_file "data/ose/short_train_pair.csv" \
 --validation_file "data/ose/short_val_pair.csv" \
 --test_file "data/ose/short_test_pair.csv" \
@@ -23,4 +23,3 @@ python ./main.py \
 --output_dir output/ \
 --logging_strategy steps \
 --logging_steps 4 \
---report_to wandb \

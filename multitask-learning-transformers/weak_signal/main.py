@@ -1,9 +1,8 @@
 # %%
 import os
 # #os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
-os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-os.environ['CUDA_VISIBLE_DEVICES'] = "0"
-os.environ['WANDB_WATCH']="all"
+# os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
+# os.environ['CUDA_VISIBLE_DEVICES'] = "0,3"
 
 # %%
 # Standard library imports
@@ -11,6 +10,8 @@ import logging
 import random
 from datetime import datetime
 from pathlib import Path
+import json
+import sys
 
 # Third party imports
 import nltk
@@ -45,8 +46,8 @@ from model import BertForMTPairwiseRanking
 # from utils.arguments import parse_args
 from utils.args import DataTrainingArguments, ModelArguments
 # %%
-
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 try:
     nltk.data.find("tokenizers/punkt")
@@ -57,11 +58,52 @@ except (LookupError, OSError):
         )
     with FileLock(".lock") as lock:
         nltk.download("punkt", quiet=True)
+
+class DebugTrainer(Trainer):
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        # logging.debug(inputs)  # Add logging here
+        return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
+
+def write_args_to_file(model_args, data_args, training_args, output_config_file):
+    # Convert each argument object into a dictionary
+    dict_model_args = model_args.__dict__
+    dict_data_args = data_args.__dict__
+    dict_training_args = json.loads(training_args.to_json_string())
+
+    # Merge these dictionaries into one
+    merged_args = {**dict_model_args, **dict_data_args, **dict_training_args}
+
+    # Convert the merged dictionary into a JSON string
+    json_str_merged_args = json.dumps(merged_args, indent=2)
+
+    # Write the JSON string into a file
+    with open(output_config_file, 'w') as f:
+        f.write(json_str_merged_args)
+
 # %%
 def main():
-    # args = parse_args()
+    # %%
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
-    model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # #====================#
+    # Normal use
+    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+        # If we pass only one argument to the script and it's the path to a json file,
+        # let's parse it to get our arguments.
+        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    else:
+        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        write_args_to_file(model_args, data_args, training_args, f"./args_{datetime.now().strftime('%m%d%H')}.json")
+
+    
+
+    # When debug, use this
+    # model_args, data_args, training_args = parser.parse_json_file(json_file="args.json")
+    # print("model_args:", model_args)
+    # print("data_args:", data_args)
+    # print("training_args:", training_args)
+    # training_args.report_to = [] # when debug, don't log.
+    # ====================#
 
     # Log on each process the small summary:
     logger.warning(
@@ -86,23 +128,33 @@ def main():
             )
 
     set_seed(training_args.seed)
-    
+
     data_files = {"train": data_args.train_file, "validation": data_args.validation_file}
 
     if training_args.do_predict and data_args.test_file is not None:
         data_files["test"] = data_args.test_file
     # %%
-    run = wandb.init(project="readability", name="Data30_epoch1_eval")
-    run.log_code('.')
-
-    # set default values for arguments
-    # max_seq_length = 512 if data_args is None else min(data_args.max_seq_length, tokenizer.model_max_length)
-    # model_name_or_path = "bert-base-uncased" if model_args is None else model_args.model_name_or_path
-    # per_device_train_batch_size = 4 if training_args is None else training_args.per_device_train_batch_size
-    # output_dir = "output" if args is None else args.output_dir
-    # num_train_epochs = 1 if args is None else args.num_train_epochs
-    # train_file = "data/ose/short_train_pair.csv" if args is None else data_args.train_file
-    # validation_file = "data/ose/short_val_pair.csv" if args is None else data_args.validation_file
+    # only log if report to wandb
+    if "wandb" in training_args.report_to:
+        # add epoch, data size, batch size, do_train, do_eval
+        tags = [f"Epoch: {training_args.num_train_epochs}", f"Train batch: {training_args.per_device_train_batch_size}"]
+        tags.append("Data size: " + str(data_args.max_train_samples) if data_args.max_train_samples is not None else "Data size: all")
+        if training_args.do_train:
+            tags.append("train")
+        if training_args.do_eval:
+            tags.append("eval")
+        
+        run = wandb.init(project="readability", tags=tags)
+        run.log_code('.')
+        
+        # log args.json to wandb
+        if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+            json_file = os.path.abspath(sys.argv[1])
+        else:
+            json_file = f"./args_{datetime.now().strftime('%m%d%H')}.json"
+        json_artifact = wandb.Artifact("args", type="args")
+        json_artifact.add_file(json_file)
+        run.log_artifact(json_artifact)
 
     signal_list = [
         "syllable_count",
@@ -138,6 +190,7 @@ def main():
         num_labels=num_labels,
         finetuning_task=data_args.task_name,
         token=model_args.token,
+        return_dict=True, # If you are instantiating your model with a config, you need to pass this return_dict=True to the config create
     )
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -152,7 +205,10 @@ def main():
         signal_list=signal_list,
         token=model_args.token,
     )
-    wandb.watch(model, log="all")
+
+    # if training_args.report_to == "wandb":
+    if "wandb" in training_args.report_to:
+        wandb.watch(model, log="all")
 
     if data_args.max_seq_length > tokenizer.model_max_length:
         logger.warning(
@@ -245,6 +301,7 @@ def main():
             max_length=max_seq_length // 2,
         )
 
+
         original_keys = ["input_ids", "attention_mask"]
         for key in original_keys:
             # combine features_1 and features_2
@@ -254,9 +311,12 @@ def main():
         
         example_batch["labels"] = torch.stack((labels, labels), dim=1) # example_batch.shape = [batch_size, 2, len(signal_list)]
 
-        print(f"example_batch['input_ids'].shape = {example_batch['input_ids'].shape}")
-        print(f"example_batch['attention_mask'].shape = {example_batch['attention_mask'].shape}")
-        print(f"example_batch['labels'].shape = {example_batch['labels'].shape}")
+        logging.debug(f"example_batch['input_ids'].shape = {example_batch['input_ids'].shape}")
+        logging.debug(f"type(example_batch['input_ids']) = {type(example_batch['input_ids'])}")
+        logging.debug(f"example_batch['attention_mask'].shape = {example_batch['attention_mask'].shape}")
+        logging.debug(f"type(example_batch['attention_mask']) = {type(example_batch['attention_mask'])}")
+        logging.debug(f"example_batch['labels'].shape = {example_batch['labels'].shape}")
+        logging.debug(f"type(example_batch['labels']) = {type(example_batch['labels'])}")
 
         # TODO inter-signal joint ranking labels
 
@@ -264,11 +324,9 @@ def main():
 
     # %%
     # Preprocess the datasets
-    
     for split in raw_datasets.keys():
-        print(f"Processing {split} dataset...")
+        logging.info(f"Processing {split} dataset...")
         raw_datasets[split], threshold = compute_threshold(raw_datasets[split]) # need to be computed before mapping to preprocess function
-        # print(f"Removing columns: {raw_datasets[split].column_names}")
         raw_datasets[split] = raw_datasets[split].map(
             preprocess_function,
             remove_columns=raw_datasets[split].column_names, # remove original columns, which are not used by the model
@@ -286,6 +344,11 @@ def main():
         if data_args.max_train_samples is not None:
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
+        assert set(train_dataset[0].keys()) == set(["input_ids", "attention_mask", "labels"]), f"Keys mismatch: {set(train_dataset[0].keys())}"
+
+        # Log a few random samples from the training set for eyeball test:
+        for index in random.sample(range(len(train_dataset)), 2):
+            logger.debug(f"Sample {index} of the training set: {train_dataset[index]}.")
 
     if training_args.do_eval:
         if "validation" not in raw_datasets:
@@ -294,6 +357,7 @@ def main():
         if data_args.max_eval_samples is not None:
             max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
             eval_dataset = eval_dataset.select(range(max_eval_samples))
+        assert set(eval_dataset[0].keys()) == set(["input_ids", "attention_mask", "labels"]), f"Keys mismatch: {set(train_dataset[0].keys())}"
 
     if training_args.do_predict:
         if "test" not in raw_datasets:
@@ -303,62 +367,37 @@ def main():
             max_predict_samples = min(len(predict_dataset), data_args.max_predict_samples)
             predict_dataset = predict_dataset.select(range(max_predict_samples))
 
-    # Log a few random samples from the training set for eyeball test:
-    if training_args.do_train:
-        for index in random.sample(range(len(train_dataset)), 3):
-            logger.info(f"Sample {index} of the training set: {train_dataset[index]}.")
-
-
-    # %%
-    # verify that the features are correct
-    assert set(train_dataset[0].keys()) == set(["input_ids", "attention_mask", "labels"]), f"Keys mismatch: {set(train_dataset[0].keys())}"
-
     # %%
     def compute_metrics(p: EvalPrediction):
-        # TODO
+        # p.prediction returns everything except loss from model.forward()
         """
         For each weak signal, compute its ranking accuracy.
         """
-        print("**Compute metrics**")
-        print(p)
+        logging.info("**Compute metrics**")
+
         metric = evaluate.load("accuracy")
-        preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
-        print("preds.shape:", preds.shape)
-        print("p.predictions.shape:", p.predictions.shape)
-        preds = np.argmax(preds, axis=1)
-        result = metric.compute(predictions=preds, references=p.label_ids)
+
+        preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions # (len(dataset), num_signals, 3)
+        preds = np.argmax(preds, axis=2) # (len(dataset), num_signals)
+        preds = preds - 1 # (len(dataset), num_signals)
+
+        labels = p.label_ids # (len(dataset), 2, num_signals)
+        labels = labels[:, 0, :] # (len(dataset), num_signals)
+
+        # make sure preds and labels are aligned in shape
+        assert preds.shape == labels.shape, f"preds.shape = {preds.shape}, labels.shape = {labels.shape}"
+
+        preds, labels = preds.flatten(), labels.flatten()
+
+        result = metric.compute(predictions=preds, references=labels)
+
         if len(result) > 1:
             result["combined_score"] = np.mean(list(result.values())).item()
         return result
 
-    #     preds, labels = p.predictions, p.label_ids
-    #     print(f"preds.shape = {preds.shape}")
-    #     print(f"labels.shape = {labels.shape}")
-
-
-    #     # preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions
-    #     preds = np.squeeze(preds) if is_regression else np.argmax(preds, axis=1)
-    #     metric = evaluate.load("accuracy")
-    #     # for signal in signal_list:
-
-    #     # prediction[idx] = torch.where(
-    #     #     logits_1[idx] - logits_2[idx] > self.margin[idx],
-    #     #     1,
-    #     #     torch.where(
-    #     #         logits_1[idx] - logits_2[idx] < -self.margin[idx]
-    #     #         -1,
-    #     #         0,
-    #     #     ),
-    #     # )
-    #     result = metric.compute(predictions=preds, references=labels)
-
-    #     if len(result) > 1:
-    #         result["combined_score"] = np.mean(list(result.values())).item()
-    #     return result
-
     # %%
-    # device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    trainer = Trainer(
+    trainer = DebugTrainer(
+    # trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
@@ -368,6 +407,8 @@ def main():
         data_collator=default_data_collator,
     )
 
+
+    # %%
     # Training
     if training_args.do_train:
         checkpoint = None
@@ -382,25 +423,17 @@ def main():
         )
         metrics["train_samples"] = min(max_train_samples, len(train_dataset))
 
-        trainer.save_model()  # Saves the tokenizer too for easy upload
+        trainer.save_model(f"./model_{datetime.now().strftime('%m%d%H')}")  # Saves the tokenizer too for easy upload
 
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train", metrics)
         trainer.save_state()
 
     # %%
-    # save model with timestamp
-    trainer.save_model(f"./model_{datetime.now().strftime('%m%d%H')}")
-
-    # model_file = Path(f"./{task_name}_model/pytorch_model.bin")
-    # config_file = Path(f"./{task_name}_model/config.json")
-
-    # %%
     # Evaluation
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
 
-        # Loop to handle MNLI double evaluation (matched, mis-matched)
         tasks = [data_args.task_name]
         eval_datasets = [eval_dataset]
 
@@ -413,33 +446,97 @@ def main():
             metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
 
             trainer.log_metrics("eval", metrics)
-            trainer.save_metrics("eval", combined if task is not None and "mnli" in task else metrics)
+            trainer.save_metrics("eval", metrics)
 
+    # %%
     if training_args.do_predict:
-        # TODO
+        # TODO: 等第三階段好了再改
         logger.info("*** Predict ***")
 
-        # Loop to handle MNLI double evaluation (matched, mis-matched)
-        tasks = [data_args.task_name]
-        predict_datasets = [predict_dataset]
-        for predict_dataset, task in zip(predict_datasets, tasks):
-            # Removing the `label` columns because it contains -1 and Trainer won't like that.
-            predict_dataset = predict_dataset.remove_columns("label")
-            predictions = trainer.predict(predict_dataset, metric_key_prefix="predict").predictions
-            predictions = np.squeeze(predictions) if is_regression else np.argmax(predictions, axis=1)
+        # p.prediction returns everything except loss from model.forward()
+        """
+        For each weak signal, compute its ranking accuracy.
+        """
+        logging.info("**Compute metrics**")
 
-            output_predict_file = os.path.join(training_args.output_dir, f"predict_results_{task}.txt")
-            if trainer.is_world_process_zero():
-                with open(output_predict_file, "w") as writer:
-                    logger.info(f"***** Predict results {task} *****")
-                    writer.write("index\tprediction\n")
-                    for index, item in enumerate(predictions):
-                        if is_regression:
-                            writer.write(f"{index}\t{item:3.3f}\n")
-                        else:
-                            item = label_list[item]
-                            writer.write(f"{index}\t{item}\n")
+        p = trainer.predict(predict_dataset=predict_dataset)
+        # p = p.remove_columns("label")
+
+        metric = evaluate.load("accuracy")
+
+        preds = p.predictions[0] if isinstance(p.predictions, tuple) else p.predictions # (len(dataset), num_signals, 3)
+        preds = np.argmax(preds, axis=2) # (len(dataset), num_signals)
+        preds = preds - 1 # (len(dataset), num_signals)
+
+        labels = p.label_ids # (len(dataset), 2, num_signals)
+        labels = labels[:, 0, :] # (len(dataset), num_signals)
+
+        # make sure preds and labels are aligned in shape
+        assert preds.shape == labels.shape, f"preds.shape = {preds.shape}, labels.shape = {labels.shape}"
+
+        preds, labels = preds.flatten(), labels.flatten()
+
+        result = metric.compute(predictions=preds, references=labels)
+
+        if len(result) > 1:
+            result["combined_score"] = np.mean(list(result.values())).item()
+
+        output_predict_file = os.path.join(training_args.output_dir, f"predict_results_{task}.txt")
+        if trainer.is_world_process_zero():
+            with open(output_predict_file, "w") as writer:
+                logger.info(f"***** Predict results {task} *****")
+                writer.write("index\tprediction\n")
+                for index, item in enumerate(preds):
+                    # item = label_list[item]
+                    writer.write(f"{index}\t{item}\n")
 
 
+# %%
 if __name__ == "__main__":
     main()
+
+
+
+    # %%
+    ##### Debugging #####
+    # # select one batch from eval_dataset
+    # batch = None
+    # # Create DataLoader
+    # eval_dataloader = trainer.get_eval_dataloader()
+
+    # # Get a batch of data
+    # for batch in eval_dataloader:
+    #     # Convert lists in batch to tensors
+    #     print(batch)
+    #     print(type(batch))
+    #     # list of tensors to tensor
+    #     # batch_tensors = {key: torch.stack(value) for key, value in batch.items()}
+    #     print("=======", type(batch['input_ids']))
+    #     print("-------", len(batch['input_ids']))
+    #     print("=======", type(batch['input_ids'][0]))
+    #     print("-------", len(batch['input_ids'][0]))
+    #     print("=======", type(batch['input_ids'][0][0]))
+    #     print("=======", type(batch['input_ids'][0][0][0]))
+        
+    #     # input_ids is a list of list of tensors --> tensor
+    #     # stacked_tensors = torch.stack([torch.stack(sublist) for sublist in batch['input_ids']])
+    #     # print("stacked_tensors.shape:", stacked_tensors.shape)
+    #     # print("stacked_tensors:", type(stacked_tensors))
+
+    #     # batch_tensors = {
+    #     #     'input_ids': torch.stack([torch.stack(sublist) for sublist in batch['input_ids']]),
+    #     #     'attention_mask': torch.stack([torch.stack(sublist) for sublist in batch['attention_mask']]),
+    #     #     'labels': torch.stack([torch.stack(sublist) for sublist in batch['labels']]),
+    #     # }
+
+    #     # print("type(batch_tensors['input_ids']):", type(batch_tensors['input_ids']))
+    #     # print("type(batch_tensors['attention_mask']):", type(batch_tensors['attention_mask']))
+    #     # print("type(batch_tensors['labels']):", type(batch_tensors['labels']))
+
+    #     # Send batch to model for prediction
+    #     prediction = model(**batch)
+    #     break
+
+    # print("type(logits):", type(prediction.logits))
+    # print("logits.shape:", prediction.logits.shape) # torch.Size([10, 8, 3])
+    # print("label.shape:", batch['labels'].shape) # torch.Size([8, 2, 10])

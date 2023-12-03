@@ -3,6 +3,7 @@ multiple_prediction_heads/
 shared_encoder/
 wandb/
 output/
+model*/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
